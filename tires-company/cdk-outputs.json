@@ -1,0 +1,9 @@
+{
+  "TiresCompanyStack": {
+    "cognitoAuthUrl": "https://auth-user-pool-domain.auth.eu-west-1.amazoncognito.com",
+    "tiresApiKey": "SuperSecretKey!12345",
+    "tiresApi": "https://x32p1px0kj.execute-api.eu-west-1.amazonaws.com/prod/",
+    "OrdersApiEndpointAC1CCDAC": "https://x32p1px0kj.execute-api.eu-west-1.amazonaws.com/prod/",
+    "ordersClientId": "3r78mg0ia0ip7e5kvuorad5kaf"
+  }
+}
