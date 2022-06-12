@@ -1,2 +1,6 @@
 docs/.DS_Store
 .DS_Store
+car-company/cdk-outputs.json
+tires-company-dest/cdk-outputs.json
+tires-company/cdk-outputs.json
+car-company/cdk.context.json

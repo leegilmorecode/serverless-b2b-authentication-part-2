@@ -2,10 +2,12 @@ import * as apigw from "aws-cdk-lib/aws-apigateway";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as nodeLambda from "aws-cdk-lib/aws-lambda-nodejs";
 import * as path from "path";
 import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as waf from "aws-cdk-lib/aws-wafv2";
 
 import {
   CfnOutput,
@@ -18,9 +20,15 @@ import {
 import { Construct } from "constructs";
 import { UserPool } from "aws-cdk-lib/aws-cognito";
 
+interface TiresCompanyStackProps extends StackProps {
+  ordersApiIp: string;
+}
+
 export class TiresCompanyStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props?: TiresCompanyStackProps) {
     super(scope, id, props);
+
+    if (!props?.ordersApiIp) throw new Error("missing params");
 
     // create the tires orders event bus
     const ordersEventBus: events.EventBus = new events.EventBus(
@@ -32,6 +40,16 @@ export class TiresCompanyStack extends Stack {
     );
     ordersEventBus.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
+    // add archive and replay to our bus
+    ordersEventBus.archive("OrdersEventBusArchive", {
+      archiveName: "orders-events-archive",
+      description: "An archive of the orders events",
+      eventPattern: {
+        account: [Stack.of(this).account],
+      },
+      retention: Duration.days(1), // we would typically have this larger, say 365 days
+    });
+
     // create the stock table for storing the tire orders
     const stockTable: dynamodb.Table = new dynamodb.Table(
       this,
@@ -39,7 +57,7 @@ export class TiresCompanyStack extends Stack {
       {
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         encryption: dynamodb.TableEncryption.AWS_MANAGED,
-        pointInTimeRecovery: false,
+        pointInTimeRecovery: true, // we add point in time recovery for our table
         tableName: "StockOrders",
         contributorInsightsEnabled: true,
         removalPolicy: RemovalPolicy.DESTROY,
@@ -88,12 +106,12 @@ export class TiresCompanyStack extends Stack {
     // allow the complete orders lambda to put events to the bus
     ordersEventBus.grantPutEventsTo(completeOrderHandler);
 
-    // ensure there is a rule to run the lambda every minute to complete tire orders async
+    // ensure there is a rule to run the lambda every hour to complete tire orders async
     const generateTokenRule: events.Rule = new events.Rule(
       this,
       "GenerateTokenRule",
       {
-        schedule: events.Schedule.rate(Duration.minutes(1)),
+        schedule: events.Schedule.rate(Duration.minutes(10)),
       }
     );
 
@@ -105,10 +123,77 @@ export class TiresCompanyStack extends Stack {
     stockTable.grantWriteData(orderStockHandler);
     stockTable.grantReadWriteData(completeOrderHandler);
 
+    // create a resource policy specific to whitelisting the
+    // car orders domain elastic ip
+    const apiResourcePolicy = new iam.PolicyDocument({
+      statements: [
+        new iam.PolicyStatement({
+          actions: ["execute-api:Invoke"],
+          principals: [new iam.AnyPrincipal()],
+          resources: ["execute-api:/*/*/*"],
+        }),
+        new iam.PolicyStatement({
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ["execute-api:Invoke"],
+          resources: ["execute-api:/*/*/*"],
+          conditions: {
+            NotIpAddress: {
+              "aws:SourceIp": [props?.ordersApiIp],
+            },
+          },
+        }),
+      ],
+    });
+
+    // create the waf ip set for the api
+    const webAclIPSet = new waf.CfnIPSet(this, "TiresWhitelistIpSet", {
+      name: "tires-whitelist-ip-set",
+      addresses: [`${props.ordersApiIp}/32`], // the source orders api ip address which we allow
+      ipAddressVersion: "IPV4",
+      scope: "REGIONAL",
+      description: "tires api ip set",
+    });
+
+    const webacl = new waf.CfnWebACL(this, "TiresWhitelistWebAcl", {
+      defaultAction: {
+        block: {}, // the default action is to block all requests
+      },
+      name: "tires-whitelist-ips-acl",
+      rules: [
+        {
+          name: "tires-whitelist-ips-acl-rule",
+          priority: 0,
+          action: {
+            allow: {}, // we allow only specific ip
+          },
+          statement: {
+            ipSetReferenceStatement: {
+              arn: webAclIPSet.attrArn,
+            },
+          },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "tires-whitelist-ips-acl-rule",
+          },
+        },
+      ],
+      scope: "REGIONAL",
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: "tires-whitelist-ips-acl-rule",
+        sampledRequestsEnabled: true,
+      },
+    });
+
     // create the api for the orders in the tires domain
-    const tiresAPI: apigw.RestApi = new apigw.RestApi(this, "OrdersApi", {
+    const tiresAPI: apigw.RestApi = new apigw.RestApi(this, "TiresOrdersApi", {
       description: "tires orders api",
       restApiName: "tires-orders-api",
+      policy: apiResourcePolicy,
+      endpointTypes: [apigw.EndpointType.EDGE],
+      // we use the default of edge optimised, which means we don't require a cloudfront distribution
       deploy: true,
       deployOptions: {
         stageName: "prod",
@@ -117,6 +202,12 @@ export class TiresCompanyStack extends Stack {
         tracingEnabled: true,
         metricsEnabled: true,
       },
+    });
+
+    // associate the waf to the tires api gateway
+    new waf.CfnWebACLAssociation(this, "WebAclAssoc", {
+      webAclArn: webacl.attrArn,
+      resourceArn: tiresAPI.deploymentStage.stageArn,
     });
 
     // add the usage plan for the api
@@ -149,19 +240,19 @@ export class TiresCompanyStack extends Stack {
     // create the cognito user pool for auth
     const authUserPool: cognito.UserPool = new cognito.UserPool(
       this,
-      "AuthUserPool",
+      "TireOrdersAuthUserPool",
       {
-        userPoolName: "AuthUserPool",
+        userPoolName: "TireOrdersAuthUserPool",
         removalPolicy: RemovalPolicy.DESTROY,
       }
     );
 
     // create a user pool domain (this will allow the car orders domain to request tokens from it)
-    const authUserPoolDomain: cognito.UserPoolDomain =
-      new cognito.UserPoolDomain(this, "AuthUserPoolDomain", {
+    const tireOrdersAuthUserPoolDomain: cognito.UserPoolDomain =
+      new cognito.UserPoolDomain(this, "TireOrdersAuthUserPoolDomain", {
         userPool: authUserPool,
         cognitoDomain: {
-          domainPrefix: "auth-user-pool-domain",
+          domainPrefix: "tire-orders-auth-user-pool-domain",
         },
       });
 
@@ -189,10 +280,10 @@ export class TiresCompanyStack extends Stack {
       });
 
     // create the client for the car orders domain i.e. the consumer of the tires domain
-    const ordersDomainClient: cognito.UserPoolClient =
+    const carOrdersDomainClient: cognito.UserPoolClient =
       new cognito.UserPoolClient(this, "OrdersDomainClient", {
         userPool: authUserPool,
-        userPoolClientName: "OrdersDomainClient",
+        userPoolClientName: "CarOrdersDomainClient",
         preventUserExistenceErrors: true,
         refreshTokenValidity: Duration.minutes(60),
         accessTokenValidity: Duration.minutes(60),
@@ -270,16 +361,16 @@ export class TiresCompanyStack extends Stack {
       exportName: "tiresApiKey",
     });
 
-    new CfnOutput(this, "ordersClientId", {
-      value: ordersDomainClient.userPoolClientId,
-      description: "The orders client ID",
-      exportName: "ordersClientId",
+    new CfnOutput(this, "carOrdersClientId", {
+      value: carOrdersDomainClient.userPoolClientId,
+      description: "The car orders client ID",
+      exportName: "carOrdersClientId",
     });
 
-    new CfnOutput(this, "cognitoAuthUrl", {
-      value: `https://${authUserPoolDomain.domainName}.auth.${process.env.CDK_DEFAULT_REGION}.amazoncognito.com`,
+    new CfnOutput(this, "tireOrdersCognitoAuthUrl", {
+      value: `https://${tireOrdersAuthUserPoolDomain.domainName}.auth.${process.env.CDK_DEFAULT_REGION}.amazoncognito.com`,
       description: "The Cognito user pool auth url",
-      exportName: "cognitoAuthUrl",
+      exportName: "tireOrdersCognitoAuthUrl",
     });
   }
 }

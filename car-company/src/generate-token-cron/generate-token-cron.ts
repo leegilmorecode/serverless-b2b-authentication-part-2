@@ -20,8 +20,8 @@ export const generateTokenHandler: Handler = async (): Promise<void> => {
       SSM_ORDER_STOCK_TOKEN_PARAM: tokenParameterPath,
       ORDER_STOCK_SCOPE: orderStockScope,
       AUTH_URL: authURL,
-      ORDERS_CLIENT_ID: ordersClientId,
-      ORDERS_CLIENT_SECRET: ordersClientSecret,
+      CAR_ORDERS_CLIENT_ID: ordersClientId,
+      CAR_ORDERS_CLIENT_SECRET: ordersClientSecret,
     } = process.env;
 
     if (

@@ -13,7 +13,10 @@ import {
 import { Construct } from "constructs";
 
 interface TiresCompanyDestStackProps extends StackProps {
-  ordersApi: string;
+  carOrdersApi: string;
+  carOrdersCognitoAuthUrl: string;
+  tiresOrderClientId: string;
+  tiresOrderClientSecret: string;
 }
 
 export class TiresCompanyDestStack extends Stack {
@@ -24,42 +27,61 @@ export class TiresCompanyDestStack extends Stack {
   ) {
     super(scope, id, props);
 
-    if (!props?.ordersApi) throw new Error("missing props");
+    if (
+      !props?.carOrdersApi ||
+      !props?.carOrdersCognitoAuthUrl ||
+      !props?.tiresOrderClientId
+    ) {
+      throw new Error("missing props");
+    }
 
-    // get the orders event bus from the other tires stack
+    // get the tires orders event bus from the other tires stack
     const ordersEventBus = events.EventBus.fromEventBusName(
       this,
       "orders-event-bus",
       "orders-event-bus"
     );
 
+    // oath properties for our connection
+    const oAuthAuthorizationProps: events.OAuthAuthorizationProps = {
+      authorizationEndpoint: `${props.carOrdersCognitoAuthUrl}/oauth2/token`,
+      clientId: props.tiresOrderClientId,
+      // Note: this is for the demo only, and we chould never hard code these secret values
+      clientSecret: SecretValue.unsafePlainText(props.tiresOrderClientSecret),
+      httpMethod: events.HttpMethod.POST,
+      bodyParameters: {
+        grant_type: events.HttpParameter.fromString("client_credentials"),
+      },
+      headerParameters: {},
+      queryStringParameters: {},
+    };
+
     // create the car orders connection for the api destination
     const carOrdersConnection: events.Connection = new events.Connection(
       this,
-      "CarOrdersApiDestinationsConnection",
+      "CarOrdersDestinationsConnection",
       {
-        authorization: events.Authorization.apiKey(
-          "x-api-key",
-          SecretValue.unsafePlainText("SuperSecretKey") // this is for a demo only - never use this method in production
-        ),
+        authorization: events.Authorization.oauth(oAuthAuthorizationProps),
         description: "Car Orders API Destination Connection",
-        connectionName: "CarOrdersApiDestinationsConnection",
+        connectionName: "CarOrdersDestinationsConnection",
       }
     );
 
     // create the api destination for the car orders connection
     const carOrdersDestination: events.ApiDestination =
-      new events.ApiDestination(this, "CarOrdersDestination", {
+      new events.ApiDestination(this, "CarOrdersAPIDestination", {
         connection: carOrdersConnection,
-        endpoint: `${props.ordersApi}/*`, // the '*' placeholder is replaced with the id using the target
+        endpoint: `${props.carOrdersApi}/*`, // the '*' placeholder is replaced with the id using the target
         description: "The api destination for our car orders api",
         rateLimitPerSecond: 50, // this allows us to limit the requests we sent to the orders api
         httpMethod: events.HttpMethod.PATCH,
         apiDestinationName: "CarOrdersDestination",
       });
 
+    carOrdersDestination.node.addDependency(carOrdersConnection);
+
     // create the target rule for the api destination
-    new events.Rule(this, "CarOrdersApiDestinationsRule", {
+    const rule = new events.Rule(this, "CarOrdersApiDestinationsRule", {
       eventBus: ordersEventBus,
       ruleName: "CarOrdersApiDestinationsRule",
       description: "Rule for Orders API Destination",
@@ -82,5 +104,7 @@ export class TiresCompanyDestStack extends Stack {
         }),
       ],
     });
+
+    rule.node.addDependency(carOrdersDestination);
   }
 }

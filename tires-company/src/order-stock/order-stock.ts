@@ -24,6 +24,7 @@ export const orderStockHandler: APIGatewayProxyHandler = async (
     // log the clientId (consumer) and the apiKeyId that they used to show this working
     console.log(`clientId: ${event.requestContext.authorizer?.claims.sub}`); // this is the car company id
     console.log(`apiKey: ${event.requestContext.identity.apiKeyId}`); // this is the specific api key used
+    console.log(`sourceIp: ${event.requestContext.identity.sourceIp}`); // the elastic ip of our nat gateway in the car domain
 
     const order = JSON.parse(event.body as string);
 
