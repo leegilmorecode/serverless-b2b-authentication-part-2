@@ -6,7 +6,7 @@ An example of Serverless B2B authentication, written in TypeScript and the CDK
 
 Example of productionising our solution from Part 1, which uses API Gateway, EventBridge API Destinations and Cognito to onboard and integrate with external customers, focusing on security, scalability and availability. Example written in the CDK and Typescript.
 
-The article can be found here: x
+The article can be found here: https://leejamesgilmore.medium.com/1baa29df7697
 
 ## Getting started
 
